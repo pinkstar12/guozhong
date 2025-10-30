@@ -18,12 +18,21 @@ class HierarchicalRLConfig:
     high_level_epsilon: float = 0.1
     high_level_gamma: float = 0.95
     high_level_update_frequency: int = 10
-    
-    # 低层决策参数  
+
+    # 低层决策参数
     low_level_lr: float = 0.0005
     low_level_epsilon: float = 0.2
     low_level_gamma: float = 0.9
-    
+
+    # 元学习 / 迁移适配参数
+    meta_batch_size: int = 3
+    inner_lr: float = 0.0005
+    inner_steps: int = 1
+    meta_step_size: float = 0.05
+    meta_update_frequency: int = 20
+    task_buffer_size: int = 200
+    adaptation_reward_threshold: float = 4.0
+
     # 网络结构参数
     high_level_hidden_dim: int = 128
     low_level_hidden_dim: int = 64
@@ -267,11 +276,11 @@ class ExpertKnowledgeSystem:
 # ====================== 分层强化学习智能体 ======================
 class HierarchicalRLAgent:
     """分层强化学习智能体"""
-    
+
     def __init__(self, config: HierarchicalRLConfig, expert_system: ExpertKnowledgeSystem):
         self.config = config
         self.expert_system = expert_system
-        
+
         # 初始化网络
         self.high_level_policy = HighLevelPolicyNetwork(
             config.state_dim, config.action_dim, config.high_level_hidden_dim
@@ -298,12 +307,21 @@ class HierarchicalRLAgent:
         # 经验缓冲区
         self.high_level_buffer = ReplayBuffer(config.buffer_size)
         self.low_level_buffer = ReplayBuffer(config.buffer_size)
-        
+
+        # 任务级经验池，用于元学习
+        self.meta_memory = {
+            'high': defaultdict(lambda: deque(maxlen=config.task_buffer_size)),
+            'low': defaultdict(lambda: deque(maxlen=config.task_buffer_size))
+        }
+
+        # 元学习更新计数
+        self.meta_counters = {'high': 0, 'low': 0}
+
         # 训练统计
         self.training_step = 0
         self.high_level_losses = []
         self.low_level_losses = []
-        
+
         print("分层强化学习智能体初始化完成")
     
     def select_leaders(self, drone_states: Dict) -> Dict[str, LeadershipRole]:
@@ -359,15 +377,15 @@ class HierarchicalRLAgent:
             'global_value': outputs['value']
         }
     
-    def low_level_decision(self, state: torch.Tensor, goal: torch.Tensor, drone_id: str, 
-                          drone_state: Dict) -> Tuple[int, float]:
+    def low_level_decision(self, state: torch.Tensor, goal: torch.Tensor, drone_id: str,
+                          drone_state: Dict, task_type: TaskType) -> Tuple[int, float]:
         """低层决策 - 具体动作执行"""
         # 获取专家建议
         expert_probs = self.expert_system.get_expert_action_probability(
-            drone_state, TaskType.TARGET_ELIMINATION
+            drone_state, task_type
         )
         expert_probs_tensor = torch.FloatTensor(expert_probs)
-        
+
         # 神经网络策略
         with torch.no_grad():
             nn_probs, value = self.low_level_policy(state.unsqueeze(0), goal.unsqueeze(0))
@@ -424,8 +442,13 @@ class HierarchicalRLAgent:
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.high_level_policy.parameters(), 1.0)
         self.high_level_optimizer.step()
-        
+
         self.high_level_losses.append(total_loss.item())
+
+        self.meta_counters['high'] += 1
+        if self.meta_counters['high'] >= self.config.meta_update_frequency:
+            self._perform_meta_update('high')
+            self.meta_counters['high'] = 0
     
     def train_low_level(self):
         """训练低层策略网络"""
@@ -434,24 +457,25 @@ class HierarchicalRLAgent:
         
         # 采样批量经验
         states, actions, rewards, next_states, dones = self.low_level_buffer.sample(self.config.batch_size)
-        
-        # 这里需要从经验中提取goal信息，简化处理
-        batch_size = len(states)
-        dummy_goals = torch.zeros(batch_size, self.config.action_dim)
-        
-        states = torch.FloatTensor(states)
-        actions = torch.LongTensor(actions)  
+
+        states_tensor = torch.FloatTensor(states)
+        goals = states_tensor[:, self.config.state_dim:]
+        states_tensor = states_tensor[:, :self.config.state_dim]
+
+        actions = torch.LongTensor(actions)
         rewards = torch.FloatTensor(rewards)
-        next_states = torch.FloatTensor(next_states)
+        next_states_tensor = torch.FloatTensor(next_states)
+        next_goals = next_states_tensor[:, self.config.state_dim:]
+        next_states_tensor = next_states_tensor[:, :self.config.state_dim]
         dones = torch.BoolTensor(dones)
-        
+
         # 当前策略和价值
-        current_probs, current_values = self.low_level_policy(states, dummy_goals)
+        current_probs, current_values = self.low_level_policy(states_tensor, goals)
         current_values = current_values.squeeze()
-        
+
         # 目标价值
         with torch.no_grad():
-            _, next_values = self.low_level_target(next_states, dummy_goals)
+            _, next_values = self.low_level_target(next_states_tensor, next_goals)
             next_values = next_values.squeeze()
             target_values = rewards + (self.config.low_level_gamma * next_values * ~dones)
         
@@ -472,13 +496,101 @@ class HierarchicalRLAgent:
         self.low_level_optimizer.step()
         
         self.low_level_losses.append(total_loss.item())
-    
+
+        self.meta_counters['low'] += 1
+        if self.meta_counters['low'] >= self.config.meta_update_frequency:
+            self._perform_meta_update('low')
+            self.meta_counters['low'] = 0
+
     def update_target_networks(self):
         """更新目标网络"""
         if self.training_step % self.config.target_update_frequency == 0:
             self.high_level_target.load_state_dict(self.high_level_policy.state_dict())
             self.low_level_target.load_state_dict(self.low_level_policy.state_dict())
             print(f"更新目标网络 (步骤: {self.training_step})")
+
+    def store_meta_experience(self, level: str, task_id: str, experience: Tuple[np.ndarray, int, float, np.ndarray, bool]):
+        """缓存任务级经验以支持元学习"""
+        if task_id is None:
+            return
+        if level not in self.meta_memory:
+            return
+        state, action, reward, next_state, done = experience
+        self.meta_memory[level][task_id].append((state, action, reward, next_state, done))
+
+    def _perform_meta_update(self, level: str):
+        """基于 Reptile 思想执行一次元学习更新"""
+        buffers = self.meta_memory.get(level, {})
+        if len(buffers) < self.config.meta_batch_size:
+            return
+
+        sampled_tasks = random.sample(list(buffers.keys()), self.config.meta_batch_size)
+        for task_id in sampled_tasks:
+            experiences = buffers[task_id]
+            if len(experiences) < self.config.batch_size:
+                continue
+            batch = random.sample(list(experiences), self.config.batch_size)
+            self._reptile_update(level, batch)
+
+    def rapid_adaptation(self, task_id: Optional[str] = None):
+        """在奖励剧烈波动时快速适配特定任务"""
+        if task_id is None:
+            return
+        for level in ('high', 'low'):
+            buffers = self.meta_memory.get(level, {})
+            if task_id not in buffers or not buffers[task_id]:
+                continue
+            recent_batch = list(buffers[task_id])[-min(len(buffers[task_id]), self.config.batch_size):]
+            self._reptile_update(level, recent_batch)
+
+    def _reptile_update(self, level: str, batch: List[Tuple[np.ndarray, int, float, np.ndarray, bool]]):
+        """对指定任务批次执行一次 Reptile-style 更新"""
+        states, actions, rewards, next_states, dones = map(np.stack, zip(*batch))
+
+        if level == 'high':
+            fast_network = HighLevelPolicyNetwork(
+                self.config.state_dim, self.config.action_dim, self.config.high_level_hidden_dim
+            )
+            fast_network.load_state_dict(self.high_level_policy.state_dict())
+            optimizer = torch.optim.SGD(fast_network.parameters(), lr=self.config.inner_lr)
+
+            states_tensor = torch.FloatTensor(states)
+            rewards_tensor = torch.FloatTensor(rewards)
+
+            for _ in range(self.config.inner_steps):
+                optimizer.zero_grad()
+                outputs = fast_network(states_tensor)
+                values = outputs['value'].squeeze()
+                loss = F.mse_loss(values, rewards_tensor)
+                loss.backward()
+                optimizer.step()
+
+            for param, fast_param in zip(self.high_level_policy.parameters(), fast_network.parameters()):
+                param.data = param.data + self.config.meta_step_size * (fast_param.data - param.data)
+
+        elif level == 'low':
+            fast_network = LowLevelPolicyNetwork(
+                self.config.state_dim, self.config.action_dim, self.config.action_dim, self.config.low_level_hidden_dim
+            )
+            fast_network.load_state_dict(self.low_level_policy.state_dict())
+            optimizer = torch.optim.SGD(fast_network.parameters(), lr=self.config.inner_lr)
+
+            state_tensor = torch.FloatTensor(states)
+            goal_tensor = state_tensor[:, self.config.state_dim:]
+            state_tensor = state_tensor[:, :self.config.state_dim]
+
+            rewards_tensor = torch.FloatTensor(rewards)
+
+            for _ in range(self.config.inner_steps):
+                optimizer.zero_grad()
+                probs, values = fast_network(state_tensor, goal_tensor)
+                values = values.squeeze()
+                loss = F.mse_loss(values, rewards_tensor)
+                loss.backward()
+                optimizer.step()
+
+            for param, fast_param in zip(self.low_level_policy.parameters(), fast_network.parameters()):
+                param.data = param.data + self.config.meta_step_size * (fast_param.data - param.data)
 
 # ====================== 分层决策集成系统 ======================
 class HierarchicalDecisionSystem:
@@ -491,11 +603,13 @@ class HierarchicalDecisionSystem:
         # 初始化专家系统和强化学习智能体
         self.expert_system = ExpertKnowledgeSystem()
         self.rl_agent = HierarchicalRLAgent(self.config, self.expert_system)
-        
+
         # 状态历史
         self.state_history = []
         self.reward_history = []
-        
+        self.latest_action_records: List[Dict] = []
+        self.latest_task_type: Optional[TaskType] = None
+
         print("分层决策集成系统初始化完成")
     
     def extract_global_state(self, blue_observations: Dict) -> torch.Tensor:
@@ -532,6 +646,26 @@ class HierarchicalDecisionSystem:
             features.append(0.0)
         
         return torch.FloatTensor(features[:self.config.state_dim])
+
+    def classify_task_type(self, blue_observations: Dict) -> TaskType:
+        """根据态势粗略判断任务类别，用于任务级经验聚合"""
+        if not blue_observations:
+            return TaskType.TARGET_ELIMINATION
+
+        num_allies = len(blue_observations)
+        total_enemies = sum(len(obs.get('enemies', [])) for obs in blue_observations.values())
+        avg_threat = sum(obs['self_state'].get('threat_level', 0.0) for obs in blue_observations.values()) / max(num_allies, 1)
+        avg_energy = sum(obs['self_state'].get('energy', 0.0) for obs in blue_observations.values()) / max(num_allies, 1)
+
+        if total_enemies == 0:
+            return TaskType.RECONNAISSANCE
+        if total_enemies > num_allies * 1.5:
+            return TaskType.FORMATION_DEFENSE
+        if avg_threat > 0.6 and avg_energy < 0.5:
+            return TaskType.ESCORT
+        if avg_threat < 0.35:
+            return TaskType.AREA_SWEEP
+        return TaskType.TARGET_ELIMINATION
     
     def extract_local_state(self, observation: Dict, drone_id: str) -> torch.Tensor:
         """提取单个无人机的局部状态"""
@@ -566,39 +700,42 @@ class HierarchicalDecisionSystem:
     def get_hierarchical_decisions(self) -> set:
         """获取分层决策结果"""
         print("\n--- 开始分层强化学习决策 ---")
-        
+
         # 1. 获取观测数据
         blue_observations = self.combat_system.environment.get_all_observations('blue')
         if not blue_observations:
             return set()
-        
+
         # 2. 选择领导者
         blue_states = self.combat_system.environment.blue_drones
         leadership_assignments = self.rl_agent.select_leaders(blue_states)
-        
+
         # 3. 高层决策 (由领导者执行)
         global_state = self.extract_global_state(blue_observations)
         high_level_output = self.rl_agent.high_level_decision(global_state, blue_states)
-        
+        task_type = self.classify_task_type(blue_observations)
+        self.latest_task_type = task_type
+        self.latest_action_records = []
+
         # 4. 低层决策 (所有单位执行具体动作)
         final_decisions = set()
         action_mapping = ['attack', 'evade', 'hold', 'retreat', 'flank', 'climb', 'dive']
-        
+
         for drone_id, obs in blue_observations.items():
             # 提取局部状态
             local_state = self.extract_local_state(obs, drone_id)
-            
+
             # 获取子目标
             sub_goal = high_level_output['sub_goals'].get(drone_id, torch.zeros(self.config.action_dim))
-            
+
             # 低层决策
             action_idx, value = self.rl_agent.low_level_decision(
-                local_state, sub_goal, drone_id, obs['self_state']
+                local_state, sub_goal, drone_id, obs['self_state'], task_type
             )
-            
+
             # 转换为策略字符串
             strategy = action_mapping[action_idx]
-            
+
             # 确定参数 (如果需要目标)
             strategies_requiring_target = {'attack', 'flank'}
             if strategy in strategies_requiring_target and obs.get('enemies'):
@@ -608,50 +745,105 @@ class HierarchicalDecisionSystem:
                 params = nearest_enemy['id']
             else:
                 params = None
-            
+
             decision = (drone_id, strategy, params)
             final_decisions.add(decision)
-            
+
             role = leadership_assignments.get(drone_id, LeadershipRole.FOLLOWER)
             print(f"{role.value} {drone_id}: {strategy} (价值评估: {value:.3f})")
-        
+
+            self.latest_action_records.append({
+                'drone_id': drone_id,
+                'local_state': local_state.numpy(),
+                'sub_goal': sub_goal.detach().numpy() if isinstance(sub_goal, torch.Tensor) else np.zeros(self.config.action_dim),
+                'action': action_idx,
+                'strategy': strategy,
+                'task_id': task_type.value
+            })
+
         # 5. 存储状态用于训练
         self.state_history.append((global_state, blue_observations))
-        
+
         return final_decisions
     
     def update_rewards_and_train(self, drone_states_before: Dict, drone_states_after: Dict):
         """根据执行结果更新奖励并训练网络"""
         if len(self.state_history) < 2:
             return
-            
+
         # 计算奖励
         reward = self.calculate_reward(drone_states_before, drone_states_after)
         self.reward_history.append(reward)
-        
+
         print(f"当前奖励: {reward:.3f}")
-        
+
         # 构造训练样本 (简化版)
         if len(self.state_history) >= 2 and len(self.reward_history) >= 1:
             prev_global_state = self.state_history[-2][0]
-            curr_global_state = self.state_history[-1][0] 
-            
+            curr_global_state = self.state_history[-1][0]
+            task_id = self.latest_task_type.value if self.latest_task_type else None
+
             # 添加高层经验
             self.rl_agent.high_level_buffer.push(
                 prev_global_state.numpy(),
-                0,  # 简化的动作
-                reward,
+                np.array(0, dtype=np.int64),
+                np.array(reward, dtype=np.float32),
                 curr_global_state.numpy(),
-                False  # 简化的done标志
+                np.array(len(drone_states_after) == 0, dtype=np.bool_)
             )
-            
+            self.rl_agent.store_meta_experience(
+                'high',
+                task_id,
+                (
+                    prev_global_state.numpy(),
+                    0,
+                    reward,
+                    curr_global_state.numpy(),
+                    len(drone_states_after) == 0
+                )
+            )
+
+            # 构造低层经验
+            post_observations = self.combat_system.environment.get_all_observations('blue')
+            for record in self.latest_action_records:
+                drone_id = record['drone_id']
+                initial_state_vec = np.concatenate([record['local_state'], record['sub_goal']]).astype(np.float32)
+                next_obs = post_observations.get(drone_id)
+                if next_obs:
+                    next_state_tensor = self.extract_local_state(next_obs, drone_id)
+                    next_state_vec = np.concatenate([next_state_tensor.numpy(), record['sub_goal']]).astype(np.float32)
+                else:
+                    next_state_vec = initial_state_vec.copy()
+                done_flag = drone_id not in drone_states_after
+                self.rl_agent.low_level_buffer.push(
+                    initial_state_vec,
+                    np.array(record['action'], dtype=np.int64),
+                    np.array(reward, dtype=np.float32),
+                    next_state_vec,
+                    np.array(done_flag, dtype=np.bool_)
+                )
+                self.rl_agent.store_meta_experience(
+                    'low',
+                    record.get('task_id'),
+                    (
+                        initial_state_vec,
+                        record['action'],
+                        reward,
+                        next_state_vec,
+                        done_flag
+                    )
+                )
+
             # 训练网络
             self.rl_agent.train_high_level()
             self.rl_agent.train_low_level()
-            
+
             # 更新训练步数
             self.rl_agent.training_step += 1
             self.rl_agent.update_target_networks()
+
+            if abs(reward) >= self.config.adaptation_reward_threshold and task_id:
+                self.rl_agent.rapid_adaptation(task_id)
     
     def calculate_reward(self, states_before: Dict, states_after: Dict) -> float:
         """计算奖励函数"""
