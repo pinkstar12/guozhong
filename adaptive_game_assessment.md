@@ -1,20 +1,20 @@
 # 自适应博弈能力评估
 
 ## 结论概述
-当前 `code/` 目录下的实现尚未真正落地“自适应博弈”能力：决策主链仍依赖固定条件概率表与专家规则，分层强化学习模块虽然搭建了网络和训练接口，但缺少关键的数据采集与更新逻辑，导致策略不会随战场反馈而自我调节。
+当前 `airbattle/` 目录下的实现尚未真正落地“自适应博弈”能力：决策主链仍依赖固定条件概率表与专家规则，分层强化学习模块虽然搭建了网络和训练接口，但缺少关键的数据采集与更新逻辑，导致策略不会随战场反馈而自我调节。
 
 ## 主要证据
 1. **动态贝叶斯网络为静态表驱动**  
-   `StrategyPredictor` 将威胁、能量、距离、高度优势映射到手工编写的条件概率表，并在查表失败时走硬编码的启发式分支，没有任何在线学习、参数更新或经验驱动的调节路径。【F:code/StrategyPredictor/StrategyPredictor.py†L4-L73】
+   `StrategyPredictor` 将威胁、能量、距离、高度优势映射到手工编写的条件概率表，并在查表失败时走硬编码的启发式分支，没有任何在线学习、参数更新或经验驱动的调节路径。【F:airbattle/StrategyPredictor/StrategyPredictor.py†L4-L73】
 
 2. **高层博弈策略缺乏有效训练信号**  
-   分层智能体虽定义了高层/低层网络与经验回放，但 `update_rewards_and_train` 仅向高层缓冲区写入固定动作 `0`，完全没有把真实任务分配结果编码为经验，网络梯度来自随机初始权重而不受实际博弈影响。【F:code/Hierarchical.py†L639-L654】 进一步地，`high_level_decision` 直接以未训练的网络输出作为任务分配依据，缺乏任何与战场成绩挂钩的自我修正机制。【F:code/Hierarchical.py†L333-L360】
+   分层智能体虽定义了高层/低层网络与经验回放，但 `update_rewards_and_train` 仅向高层缓冲区写入固定动作 `0`，完全没有把真实任务分配结果编码为经验，网络梯度来自随机初始权重而不受实际博弈影响。【F:airbattle/Hierarchical.py†L639-L654】 进一步地，`high_level_decision` 直接以未训练的网络输出作为任务分配依据，缺乏任何与战场成绩挂钩的自我修正机制。【F:airbattle/Hierarchical.py†L333-L360】
 
 3. **低层自适应路径被悬空**  
-   尽管实现了低层策略网络与训练函数，但代码从未往 `low_level_buffer` 写入经验；因此 `train_low_level` 总是在缓冲区大小不足时提前返回，低层策略仅保留随机初始化 + 专家概率加权的静态组合，无法随时间适应敌情。【F:code/Hierarchical.py†L430-L474】【F:code/Hierarchical.py†L623-L654】
+   尽管实现了低层策略网络与训练函数，但代码从未往 `low_level_buffer` 写入经验；因此 `train_low_level` 总是在缓冲区大小不足时提前返回，低层策略仅保留随机初始化 + 专家概率加权的静态组合，无法随时间适应敌情。【F:airbattle/Hierarchical.py†L430-L474】【F:airbattle/Hierarchical.py†L623-L654】
 
 4. **仿真循环不产生策略演化**  
-   不论是 `HierarchicalManeuverIntegrator.run_hierarchical_simulation` 还是 `demo.MultiMissileCooperativeGuidanceSystem._execute_single_mission`，都会重复调用上述未训练的策略生成器，缺乏回放写入、奖励延迟分配、策略评估等必要环节，导致多轮仿真仍然重复相同的“硬编码 + 随机”行为，而非真实的自适应博弈。【F:code/Hierarchical.py†L723-L780】【F:code/demo.py†L68-L177】
+   不论是 `HierarchicalManeuverIntegrator.run_hierarchical_simulation` 还是 `demo.MultiMissileCooperativeGuidanceSystem._execute_single_mission`，都会重复调用上述未训练的策略生成器，缺乏回放写入、奖励延迟分配、策略评估等必要环节，导致多轮仿真仍然重复相同的“硬编码 + 随机”行为，而非真实的自适应博弈。【F:airbattle/Hierarchical.py†L723-L780】【F:airbattle/demo.py†L68-L177】
 
 ## 改进方向（思考后给出的可行方案）
 - **补齐经验采集闭环**：在每次高层、低层动作产生后，记录选取的任务/动作索引、执行前后状态与即时奖励，并分别写入对应回放缓冲区，再用这些数据驱动 `train_high_level` 与 `train_low_level`。
