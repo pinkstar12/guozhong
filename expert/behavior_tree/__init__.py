@@ -1,9 +1,2 @@
-"""
-行为树模块
-提供基于态势感知的决策行为树实现
-"""
-
-from .engine import BehaviorTreeEngine
-from .nodes import *
-
-__all__ = ['BehaviorTreeEngine']
+"""Compatibility package forwarding to :mod:`airbattle.expert.behavior_tree`."""
+from airbattle.expert.behavior_tree import *  # noqa: F401,F403
