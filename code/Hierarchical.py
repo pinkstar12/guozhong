@@ -516,20 +516,35 @@ class HierarchicalRLAgent:
         if level not in self.meta_memory:
             return
         state, action, reward, next_state, done = experience
-        self.meta_memory[level][task_id].append((state, action, reward, next_state, done))
+        self.meta_memory[level][task_id].append((
+            np.asarray(state, dtype=np.float32),
+            int(action),
+            float(reward),
+            np.asarray(next_state, dtype=np.float32),
+            bool(done)
+        ))
 
     def _perform_meta_update(self, level: str):
         """基于 Reptile 思想执行一次元学习更新"""
         buffers = self.meta_memory.get(level, {})
-        if len(buffers) < self.config.meta_batch_size:
+        if not buffers:
             return
 
-        sampled_tasks = random.sample(list(buffers.keys()), self.config.meta_batch_size)
+        eligible_tasks = [task_id for task_id, exp in buffers.items() if exp]
+        if not eligible_tasks:
+            return
+
+        if len(eligible_tasks) <= self.config.meta_batch_size:
+            sampled_tasks = eligible_tasks
+        else:
+            sampled_tasks = random.sample(eligible_tasks, self.config.meta_batch_size)
+
         for task_id in sampled_tasks:
-            experiences = buffers[task_id]
-            if len(experiences) < self.config.batch_size:
+            experiences = list(buffers[task_id])
+            inner_batch_size = min(len(experiences), self.config.batch_size)
+            if inner_batch_size == 0:
                 continue
-            batch = random.sample(list(experiences), self.config.batch_size)
+            batch = random.sample(experiences, inner_batch_size)
             self._reptile_update(level, batch)
 
     def rapid_adaptation(self, task_id: Optional[str] = None):
@@ -540,7 +555,11 @@ class HierarchicalRLAgent:
             buffers = self.meta_memory.get(level, {})
             if task_id not in buffers or not buffers[task_id]:
                 continue
-            recent_batch = list(buffers[task_id])[-min(len(buffers[task_id]), self.config.batch_size):]
+            experiences = list(buffers[task_id])
+            inner_batch_size = min(len(experiences), self.config.batch_size)
+            if inner_batch_size == 0:
+                continue
+            recent_batch = experiences[-inner_batch_size:]
             self._reptile_update(level, recent_batch)
 
     def _reptile_update(self, level: str, batch: List[Tuple[np.ndarray, int, float, np.ndarray, bool]]):
