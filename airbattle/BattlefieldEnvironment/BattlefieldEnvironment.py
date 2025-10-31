@@ -273,9 +273,10 @@ class DroneGNN(nn.Module):
         return data, drone_ids
 
     @staticmethod  # 静态方法，不需要实例化
-    def train_gnn_model(data: Data,  
-                       input_dim: int = 9, hidden_dim: int = 32, 
-                       output_dim: int = 16, epochs: int = 100) -> 'DroneGNN':
+    def train_gnn_model(data: Data,
+                       input_dim: int = 9, hidden_dim: int = 32,
+                       output_dim: int = 16, epochs: int = 100,
+                       pretrained_model: Optional['DroneGNN'] = None) -> 'DroneGNN':
         """
         训练GNN模型，使用多样性保持损失训练
         
@@ -286,11 +287,22 @@ class DroneGNN(nn.Module):
             hidden_dim: 隐藏层维度
             output_dim: 输出特征维度
             epochs: 训练轮数
+            pretrained_model: 可选的预训练模型，用于增量更新
         Returns:
             训练好的模型
         """
-        # 创建模型
-        model = DroneGNN(input_dim, hidden_dim, output_dim, heads=2)
+        # 如果已经存在预训练模型且结构匹配，则直接复用
+        model = pretrained_model
+        if model is not None:
+            if getattr(model, 'input_dim', None) != input_dim or getattr(model, 'output_dim', None) != output_dim:
+                # 特征维度已经改变，无法复用旧模型
+                model = None
+            else:
+                print("复用已有的DroneGNN模型进行增量训练。")
+
+        # 如果没有可复用模型，则重新初始化
+        if model is None:
+            model = DroneGNN(input_dim, hidden_dim, output_dim, heads=2)
         optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-3)
         
         print(f"开始训练 (多样性保持): {epochs}轮")
@@ -298,7 +310,7 @@ class DroneGNN(nn.Module):
         model.train()
         for epoch in range(epochs):
             optimizer.zero_grad()  # 清空模型参数的梯度缓存
-            
+
             output = model(data.x, data.edge_index, data.edge_attr)
             """
             PyTorch的 nn.Module 类重写了 __call__ 方法，
@@ -307,7 +319,7 @@ class DroneGNN(nn.Module):
             """
             
             # 计算损失
-            loss = torch.tensor(0.0, requires_grad=True)
+            loss = torch.tensor(0.0, device=data.x.device, requires_grad=True)
             
             # 1. 邻居一致性损失 (较小权重)：如果两个节点在图中是邻居，它们的输出特征应该尽量相似。
             if data.edge_index.shape[1] > 0:
@@ -355,6 +367,10 @@ class DroneGNN(nn.Module):
                 )
                 loss = loss + 0.2 * diversity_preservation
             
+            # 如果损失中没有可训练项，跳过反向传播
+            if loss.grad_fn is None:
+                continue
+
             loss.backward()   # 算出每个参数的“错”在哪儿、错了多少 -> 计算梯度，存储在.grad属性中
             # 梯度裁剪，限制梯度的最大范数，防止梯度爆炸
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -376,8 +392,15 @@ class DroneGNN(nn.Module):
         # 构建稀疏图
         data, drone_ids = DroneGNN.build_adjacency_graph(observations, radius, max_neighbors=3)
         
-        # 训练模型
-        model = DroneGNN.train_gnn_model(data, epochs=50)
+        # 训练或微调模型
+        model = DroneGNN.train_gnn_model(
+            data,
+            input_dim=data.x.shape[1],
+            hidden_dim=32,
+            output_dim=16,
+            epochs=50,
+            pretrained_model=pretrained_model
+        )
         
         # 获取融合特征
         model.eval()     # 把模型切换到评估模式

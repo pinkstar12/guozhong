@@ -64,6 +64,8 @@ class DroneCombatSystem:
             pretrained_model=self.trained_gnn_model
         )
         self.trained_gnn_model = updated_model  # 保存训练好的模型供下一轮复用
+        if fused_observations:
+            blue_observations = fused_observations
         # ====================================================================================
     
 
