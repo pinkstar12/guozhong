@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from typing import Dict
@@ -414,29 +415,30 @@ def run_comprehensive_demo():
     """运行综合演示"""
     print("多弹协同制导分层强化学习系统")
     print("基于动态贝叶斯网络决策与专家经验融合")
-    
+
     # 创建系统
     guidance_system = MultiMissileCooperativeGuidanceSystem()
-    
+
     # 1. 单次决策演示
     guidance_system.demonstrate_single_decision_cycle()
-    
+
     # 2. 训练任务演示
     print(f"\n是否继续执行完整训练? (系统将运行多个任务进行强化学习训练)")
-    
+
     # 运行简化训练演示 (3个任务，较短时间)
     print("开始执行简化训练演示...")
     guidance_system.run_training_missions(num_missions=3, mission_duration=15.0)
 
+
 def run_quick_demo():
     """快速演示 - 仅展示核心功能"""
     print("=== 快速功能演示 ===")
-    
+
     guidance_system = MultiMissileCooperativeGuidanceSystem()
-    
+
     # 仅演示决策过程
     guidance_system.demonstrate_single_decision_cycle()
-    
+
     print("\n=== 系统核心特性 ===")
     print("✓ 分层决策架构: 领导者负责任务分配，跟随者执行具体动作")
     print("✓ 强化学习训练: 基于奖励反馈持续优化决策策略")
@@ -445,35 +447,67 @@ def run_quick_demo():
     print("✓ 多任务协同: 支持目标消灭、区域扫描、编队防护等任务")
     print("✓ 实时态势感知: 通过图神经网络进行信息融合")
 
-if __name__ == "__main__":
-    import sys
-    
+
+def run_full_training(num_missions: int = 8, mission_duration: float = 25.0):
+    """完整训练流程"""
+    guidance_system = MultiMissileCooperativeGuidanceSystem()
+    guidance_system.run_training_missions(num_missions=num_missions, mission_duration=mission_duration)
+
+
+def _print_mode_menu():
     print("多弹协同制导分层强化学习系统")
-    print("="*50)
+    print("=" * 50)
     print("选择运行模式:")
     print("1. 快速演示 (仅展示核心功能)")
     print("2. 综合演示 (包含训练过程)")
-    print("3. 完整训练 (8个任务完整训练)")
-    
-    try:
-        choice = input("\n请输入选择 (1/2/3): ").strip()
-        
-        if choice == "1":
-            run_quick_demo()
-        elif choice == "2":
-            run_comprehensive_demo()
-        elif choice == "3":
-            guidance_system = MultiMissileCooperativeGuidanceSystem()
-            guidance_system.run_training_missions(num_missions=8, mission_duration=25.0)
+    print("3. 完整训练 (可自定义任务数量与时长)")
+
+
+def _run_mode(mode: str, missions: int, duration: float):
+    if mode == "quick":
+        run_quick_demo()
+    elif mode == "comprehensive":
+        run_comprehensive_demo()
+    elif mode == "full":
+        run_full_training(num_missions=missions, mission_duration=duration)
+    else:
+        raise ValueError(f"未知运行模式: {mode}")
+
+
+def main(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(description="多弹协同制导系统演示脚本")
+    parser.add_argument("--mode", choices=["quick", "comprehensive", "full", "prompt"], default="prompt", help="选择运行模式，默认为提示用户交互选择")
+    parser.add_argument("--missions", type=int, default=8, help="完整训练时的任务数量")
+    parser.add_argument("--duration", type=float, default=25.0, help="每个任务的持续时间")
+    args = parser.parse_args(argv)
+
+    selected_mode = args.mode
+    if selected_mode == "prompt":
+        if sys.stdin.isatty():
+            _print_mode_menu()
+            try:
+                choice = input("\n请输入选择 (1/2/3): ").strip()
+            except EOFError:
+                choice = ""
+            mapping = {"1": "quick", "2": "comprehensive", "3": "full"}
+            selected_mode = mapping.get(choice, "quick")
+            if choice not in mapping:
+                print("默认运行快速演示...")
         else:
-            print("默认运行快速演示...")
-            run_quick_demo()
-            
+            print("检测到非交互式环境，自动运行快速演示")
+            selected_mode = "quick"
+
+    try:
+        _run_mode(selected_mode, args.missions, args.duration)
     except KeyboardInterrupt:
         print("\n\n程序被用户中断")
-    except Exception as e:
-        print(f"\n程序执行异常: {e}")
+    except Exception as exc:
+        print(f"\n程序执行异常: {exc}")
         print("运行快速演示作为备选...")
         run_quick_demo()
-    
+
     print("\n程序执行完成")
+
+
+if __name__ == "__main__":
+    main()
