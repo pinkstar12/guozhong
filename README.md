@@ -68,12 +68,14 @@ pip install numpy PyYAML torch
 
    - 若存在 `configs/expert.yaml` 与 `configs/defend_expert.yaml`，脚本会使用配置构建完整系统。
    - 当配置缺失或构建失败时，将自动回退至内置参数的简化系统，仍可展示基本流程。
+   - 在无交互环境下可运行 `python airbattle/demo.py --mode quick` 快速体验分层制导示例，或使用 `--mode full --missions 5 --duration 20` 自定义训练场景。
 
 3. 根据自身环境，将实时态势数据转换为系统所需的结构体，并调用 `airbattle.expert.ExpertSystem.process(state)` 获取各机动作及解释。
 
 ## 强化学习与元学习文档
 
 - `docs/project_compendium_cn.md`：整合系统架构、分层强化学习、元学习迁移方案与自适应博弈分析。
+- `docs/windows_conda_troubleshooting.md`：在 Windows PowerShell 上运行 Conda 遇到执行策略或 PATH 错误时的排查指南。
 - `reinforcement_learning_overview.md`：详细拆解分层强化学习策略、专家融合逻辑及奖励反馈。
 - `meta_transfer_blueprint.md`：规划元学习任务缓冲、条件化策略与快速再训练机制。
 - `adaptive_game_assessment.md`：评估现有自适应博弈能力并给出补强建议。
